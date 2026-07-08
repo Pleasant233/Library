@@ -1,0 +1,10 @@
+# Obsidian 本地工作区状态（多设备会冲突，不提交）
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/cache
+
+# 系统 / 缓存
+.DS_Store
+.trash/
+
+# 保留：主题、插件、快捷键等配置会被提交，换机可还原
