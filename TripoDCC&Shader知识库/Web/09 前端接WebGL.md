@@ -1,22 +1,22 @@
 # 09 前端接 WebGL
 
-> 给你这种「会 OpenGL / GLSL,但没在浏览器里接过图形」的人。
-> 重点讲**前端侧怎么把 GLSL 跑起来**,GLSL 本身你已经会了(见 [[08 Web3D与AI]] 的模糊 shader、描边)。
+> 给你这种「懂图形管线、会写 shader(软光栅 + Unity URP 的 HLSL),但没在浏览器里接过图形」的人。
+> 重点讲**前端侧怎么把 shader 跑起来**,着色器本身你已经会了(见 [[08 Web3D与AI]] 的模糊 shader、描边)。你写过软光栅,管线每一步(顶点→图元→片元→输出)的含义你都懂,这里主要是换一层 JS API 外壳。
 > 对应你的业务:Web 端 shader(ts/js + WebGL + glsl,见 [[任务需求]])、[[Tripo Orbit]] 的网页版。
 
 ## 一、WebGL 是什么
 
-**WebGL = 浏览器里的 OpenGL ES**。你已有的 OpenGL 知识几乎直接迁移:
+**WebGL = 浏览器里的 OpenGL ES**。你写软光栅/HLSL 积累的图形管线知识几乎直接迁移,只是 API 换成 JS:
 
-| 你熟悉的 | 浏览器里对应 |
+| 图形管线里的 | 浏览器里对应 |
 | --- | --- |
-| OpenGL / OpenGL ES | **WebGL**(基于 OpenGL ES 2.0/3.0) |
-| GLSL | **GLSL ES**(几乎一样,注意精度限定符) |
-| 窗口/FBO | `<canvas>` 元素 |
-| `glGetUniformLocation` 等 C API | 同名的 JS 方法(`gl.getUniformLocation`) |
+| 标准 GL / OpenGL ES 管线 | **WebGL**(基于 OpenGL ES 2.0/3.0) |
+| GLSL / HLSL 着色器 | **GLSL ES**(和 GLSL 几乎一样,HLSL 迁移见下节) |
+| 帧缓冲 / RT / 窗口 | `<canvas>` 元素 + FBO |
+| 编译 shader、绑 VBO、设 uniform、draw | 同名的 `gl.*` JS 方法(`gl.getUniformLocation` 等) |
 
 **关键差异**:
-- 没有 C/C++,用 **JS/TS** 调用 `gl.*` API,风格几乎一一对应,只是换了语言外壳。
+- 没有 C/C++,用 **JS/TS** 调用 `gl.*` API,风格和标准 GL 一一对应,只是换了语言外壳。
 - 渲染目标是页面上的 `<canvas>`,不是操作系统窗口。
 - **WebGL 1** 对应 GLSL ES 1.0(`attribute`/`varying`,你题库里的 shader 就是这版);**WebGL 2** 对应 GLSL ES 3.0(`in`/`out`)。
 - 更现代的选择是 **WebGPU**(对标 Vulkan/Metal,[[Tripo Orbit]] 的技术栈里提到了),但普及度还不如 WebGL。
@@ -65,15 +65,26 @@ gl.uniform2f(gl.getUniformLocation(program, 'uResolution'), canvas.width, canvas
 gl.drawArrays(gl.TRIANGLES, 0, 3)
 ```
 
-> 你会发现:**每一步都能在 OpenGL 里找到对应**。前端要额外操心的只是「怎么拿 canvas、怎么把数据从 JS 传进去」。
+> 你会发现:**每一步都能在标准图形管线里找到对应**。前端要额外操心的只是「怎么拿 canvas、怎么把数据从 JS 传进去」。
 
 ## 三、GLSL ES 的几个前端坑
 
-你的 GLSL 功底够,但浏览器版有几个必须注意的:
+你平时写 URP 的 **HLSL**,迁到 **GLSL ES** 除了语法,先注意这几个语言层差异:
 
-1. **必须写精度限定符**:片元着色器开头要有 `precision highp float;`(题库里那份描边 shader 就写了),否则报错。
+| HLSL(你熟悉的) | GLSL ES |
+| --- | --- |
+| `float4 / float3 / float2` | `vec4 / vec3 / vec2` |
+| `float4x4`,矩阵**行主序** | `mat4`,矩阵**列主序**(乘法顺序、构造要留意) |
+| `mul(M, v)` | 直接用 `M * v`(运算符重载) |
+| `tex2D(s, uv)` / `Sample` | `texture2D(s, uv)`(WebGL1)/ `texture`(WebGL2) |
+| `SV_Position` / 语义(semantics) | 内置变量 `gl_Position` / `gl_FragColor`;attribute 靠名字绑定 |
+| `saturate(x)` | `clamp(x, 0.0, 1.0)`(没有 saturate) |
+
+再加浏览器版必须注意的几个:
+
+1. **必须写精度限定符**:片元着色器开头要有 `precision highp float;`(题库里那份描边 shader 就写了),否则报错。HLSL 里没这回事。
 2. **纹理采样函数名**:WebGL1 是 `texture2D(...)`,WebGL2 是 `texture(...)`。你题库的 shader 用的 `texture2D` 是 WebGL1 写法。
-3. **UV 原点**:纹理坐标 (0,0) 在**左下角**,和 OpenGL 一致;但图片加载进来常是**左上角原点**,采样上下颠倒时用 `gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)` 或在 shader 里翻转 `vUV.y`。
+3. **UV 原点**:纹理坐标 (0,0) 在**左下角**(和 OpenGL 一致,但和 D3D/HLSL 的左上角相反);图片加载进来常是左上角原点,采样上下颠倒时用 `gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)` 或在 shader 里翻转 `vUV.y`。
 4. **循环限制**:WebGL1 里 `for` 循环次数必须是**编译期常量**(不能用 uniform 当上界)。所以题库那道高斯采样把半径写死成 `i <= 2`,而不是 `i <= uRadius`——这是 WebGL1 的硬限制,不是随便写的。
 
 ## 四、渲染循环与前端事件模型
@@ -109,6 +120,7 @@ requestAnimationFrame(frame)
 
 - WebGL = 浏览器版 OpenGL ES,API 一一对应,只是换成 JS 调用。
 - 流程:canvas→compile shader→link program→传 VBO/uniform→drawArrays。
+- HLSL→GLSL ES:`float4`→`vec4`、`mul`→`*`、矩阵列主序、`saturate`→`clamp`。
 - GLSL ES 坑:必写精度、`texture2D`(WebGL1)、UV 翻转、循环上界要常量。
 - 主循环用 `requestAnimationFrame`,别用 while。
 - 生产用 Three.js 搭场景,自己专注写 shader。
