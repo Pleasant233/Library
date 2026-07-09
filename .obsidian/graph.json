@@ -5,18 +5,33 @@
   "showAttachments": false,
   "hideUnresolved": false,
   "showOrphans": true,
-  "collapse-color-groups": true,
-  "colorGroups": [],
+  "collapse-color-groups": false,
+  "colorGroups": [
+    {
+      "query": "path:TripoDCC&Shader知识库/Web  ",
+      "color": {
+        "a": 1,
+        "rgb": 5396192
+      }
+    },
+    {
+      "query": "path:TripoDCC&Shader知识库/DCC  ",
+      "color": {
+        "a": 1,
+        "rgb": 14725458
+      }
+    }
+  ],
   "collapse-display": true,
-  "showArrow": false,
+  "showArrow": true,
   "textFadeMultiplier": 0,
-  "nodeSizeMultiplier": 1,
-  "lineSizeMultiplier": 1,
-  "collapse-forces": false,
-  "centerStrength": 0.518713248970312,
-  "repelStrength": 10,
+  "nodeSizeMultiplier": 1.85413194444444,
+  "lineSizeMultiplier": 1.80372829861111,
+  "collapse-forces": true,
+  "centerStrength": 0.14296875,
+  "repelStrength": 13.0390625,
   "linkStrength": 1,
-  "linkDistance": 250,
-  "scale": 0.684933106042479,
+  "linkDistance": 134,
+  "scale": 0.559245539247895,
   "close": true
 }
