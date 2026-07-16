@@ -113,11 +113,41 @@ void CSMain (uint3 id : SV_DispatchThreadID)
 
 * URP 相机若开了 **Post Processing**，`endCameraRendering` 之后的 Blit 时机可能和 URP 自身后处理叠加，出现闪烁。若遇到再考虑改用 `beginCameraRendering` 或走 ScriptableRendererFeature。
 
+# 进展：相机射线构建
+
+在 Compute Shader 里从屏幕像素反推出世界空间射线，输出 `ray.direction*0.5+0.5` 做方向可视化（屏幕出现随视角变化的彩色渐变即为通了）。
+
+两边配合：C# 传相机矩阵，shader 用矩阵把像素 → 世界射线。
+
+```csharp
+// Raytracing.cs：每帧把相机矩阵传给 shader
+private void SetShaderParameters()
+{
+    RayTracingShader.SetMatrix("_CameraToWorld", _camera.cameraToWorldMatrix);
+    RayTracingShader.SetMatrix("_CameraInverseProjection", _camera.projectionMatrix.inverse); // 注意 .inverse
+}
+```
+
+```hlsl
+// origin = 相机位置（相机空间原点 → 世界）
+float3 origin = mul(_CameraToWorld, float4(0,0,0,1)).xyz;
+// 像素方向：先用逆投影矩阵回到相机空间，再转到世界空间
+float3 dir = mul(_CameraInverseProjection, float4(uv, 0, 1)).xyz;
+dir = normalize(mul(_CameraToWorld, float4(dir, 0)).xyz);
+```
+
+其中 `uv` 是像素中心归一化到 `[-1,1]` 的 NDC 坐标：`(id.xy + 0.5) / 分辨率 * 2 - 1`。
+
+## 本次两个典型坑
+
+* **编译错误会让所有 kernel 失效**：`float4(0.0f 0.0f, ...)` 漏了个逗号 → shader 编译失败 → `Dispatch(0,...)` 报 `Kernel at index (0) is invalid`。看到「kernel index invalid」先去查 shader 有没有编译错，而不是怀疑 kernel 名或索引。
+* **矩阵名要和内容一致**：shader 变量叫 `_CameraInverseProjection`，C# 就必须传 `projectionMatrix.inverse`（逆矩阵），传成 `projectionMatrix` 本身不报错但射线方向全错。
+
 # 后续学习计划
 
 > 随学习进度持续维护，做到哪补到哪。
 
-* [ ] Compute Shader 里搭建相机射线（从 `_CameraToWorld` / `_CameraInverseProjection` 生成 ray）
+* [x] Compute Shader 里搭建相机射线（从 `_CameraToWorld` / `_CameraInverseProjection` 生成 ray）
 * [ ] 地面平面 + 球体求交，输出法线可视化
 * [ ] 反射与多次弹射（累积 + 逐帧收敛降噪）
 * [ ] 天空盒采样
