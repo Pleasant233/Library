@@ -147,32 +147,36 @@ dir = normalize(mul(_CameraToWorld, float4(dir, 0)).xyz);
 
 思路：每帧对像素采样位置加一个随机亚像素抖动 `_PixelOffset`，再把历帧结果**加权平均**收敛。相机不动时，锯齿随采样数增加而逐渐平滑；相机一动就清零重来。
 
-## 关键：必须有「收敛缓冲」两张纹理
+## 累积靠硬件混合，AddShader 只有一句
 
-* `_target`：compute 每帧覆写，只存**本帧**（带抖动）结果
-* `_converged`：**保留历帧**的累加结果，也是最终显示的那张
-
-三步数据流，缺一不可：
+`AddShader` 带 `Blend SrcAlpha OneMinusSrcAlpha`，片元输出 alpha = `1/(_Sample+1)`。硬件混合公式 `dst = src·a + dst·(1-a)` 代入即：
 
 ```
-compute → _target                     // 本帧，_PixelOffset 抖动
-_target + AddShader → _converged       // 按 1/(sample+1) 权重累加，保留历史
-_converged → 屏幕                       // 显示收敛结果
+dst_new = 本帧 · 1/(n+1) + dst_old · n/(n+1)   // 运行平均
 ```
 
-对应 `Graphics.Blit` 的两次调用（注意三参重载 vs 两参重载的区别）：
+**累积是硬件在「目标 RT」上做的**，所以片元 shader 一句 `tex2D` 就够，教程原版也确实只有一句。前提是**目标 RT 会保留上一帧内容**。
+
+## 原文一行搞定，我这里为什么要改（关键教训）
+
+教程原版直接 `Graphics.Blit(_target, destination, _addMaterial)`，把累积做在 `OnRenderImage` 给的 `destination`（屏幕）上，一行搞定。**但这依赖「帧缓冲保留上一帧内容」这个平台相关假设**：
+
+* 教程环境 = Built-in + Windows/DX11，`destination` 恰好保留旧内容，取巧成立。
+* 本项目 = URP + macOS/Metal，且累积目标是屏幕（swapchain 多缓冲轮换 + Metal tile 架构默认不 load 旧内容）→ 混合读到的 `dst_old` 是常量垃圾 → 运行平均收敛到常数 → **整屏一片灰**。
+
+**修法（最小改动）**：别在屏幕上累积，改成累积到**自己持有的一张 RT**（`_accumulate`），它作渲染目标时硬件会 load 旧内容；再单独显示到屏幕。AddShader 一字不改，只多一张 RT：
 
 ```csharp
-Graphics.Blit(_target, _converged, _addMaterial); // 源→目标(缓冲)，用材质混合。累积写进 _converged
-Graphics.Blit(_converged, (RenderTexture)null);   // 缓冲→屏幕
+Graphics.Blit(_target, _accumulate, _addMaterial); // 累加进自己的 RT（保留旧内容）
+Graphics.Blit(_accumulate, (RenderTexture)null);   // 再显示到屏幕
 ```
 
-`AddShader` 片元输出 alpha = `1/(_SampleRate+1)`，配合 `Blend SrcAlpha OneMinusSrcAlpha` 实现「新帧权重递减」的移动平均。
+> 教训：跟平台无关的算法（运行平均）没错，错的是**照搬了教程对帧缓冲行为的隐式假设**。换了管线/平台，先怀疑这类「谁保留内容、谁被清空」的时序假设。ping-pong 双缓冲能更保险地绕开，但对这个场景是过度设计——单张自持 RT 足够。
 
 ## 本次三个坑（累积 AA 完全不生效，三者叠加，各自都是致命的）
 
 * **C# 属性名和 shader 对不上**：C# 设 `_Sample`，但 AddShader 里属性叫 `_SampleRate` → 值永远是默认 `1.0`，权重恒为 `1/2`，每帧 50/50 混合，永不收敛。**shader 属性名必须和 `SetFloat/SetVector` 的字符串逐字一致**。
-* **没有收敛缓冲，累加结果直接 blit 到屏幕**：用两参 `Blit(_target, _addMaterial)` 把结果画到屏幕，没有任何纹理保存历史 → 下一帧无「历史累积」可读，收敛无从谈起。必须引入 `_converged` 并用三参 `Blit(src, dest, mat)`。
+* **在屏幕上累积 → 一片灰**：把累积 blit 到屏幕（swapchain 不保留上一帧、Metal 默认不 load），硬件混合读到的历史值是常量，运行平均收敛到常数。见上一节「关键教训」，改成累积到自己持有的 `_accumulate` RT 再显示。
 * **`transform.hasChanged` 不可靠**：挂了移动脚本后，`Controller` 每帧写 `transform.position`（即使加零向量），也会把 `hasChanged` 置 true → 采样计数每帧清零，永远累积不起来。改为**手动比较上一帧的 position/rotation**判断相机是否真的动了。
 
 # 后续学习计划
