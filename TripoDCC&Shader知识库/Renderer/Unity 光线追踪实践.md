@@ -143,15 +143,56 @@ dir = normalize(mul(_CameraToWorld, float4(dir, 0)).xyz);
 * **编译错误会让所有 kernel 失效**：`float4(0.0f 0.0f, ...)` 漏了个逗号 → shader 编译失败 → `Dispatch(0,...)` 报 `Kernel at index (0) is invalid`。看到「kernel index invalid」先去查 shader 有没有编译错，而不是怀疑 kernel 名或索引。
 * **矩阵名要和内容一致**：shader 变量叫 `_CameraInverseProjection`，C# 就必须传 `projectionMatrix.inverse`（逆矩阵），传成 `projectionMatrix` 本身不报错但射线方向全错。
 
+# 进展：渐进式抗锯齿（progressive AA）
+
+思路：每帧对像素采样位置加一个随机亚像素抖动 `_PixelOffset`，再把历帧结果**加权平均**收敛。相机不动时，锯齿随采样数增加而逐渐平滑；相机一动就清零重来。
+
+## 关键：必须有「收敛缓冲」两张纹理
+
+* `_target`：compute 每帧覆写，只存**本帧**（带抖动）结果
+* `_converged`：**保留历帧**的累加结果，也是最终显示的那张
+
+三步数据流，缺一不可：
+
+```
+compute → _target                     // 本帧，_PixelOffset 抖动
+_target + AddShader → _converged       // 按 1/(sample+1) 权重累加，保留历史
+_converged → 屏幕                       // 显示收敛结果
+```
+
+对应 `Graphics.Blit` 的两次调用（注意三参重载 vs 两参重载的区别）：
+
+```csharp
+Graphics.Blit(_target, _converged, _addMaterial); // 源→目标(缓冲)，用材质混合。累积写进 _converged
+Graphics.Blit(_converged, (RenderTexture)null);   // 缓冲→屏幕
+```
+
+`AddShader` 片元输出 alpha = `1/(_SampleRate+1)`，配合 `Blend SrcAlpha OneMinusSrcAlpha` 实现「新帧权重递减」的移动平均。
+
+## 本次三个坑（累积 AA 完全不生效，三者叠加，各自都是致命的）
+
+* **C# 属性名和 shader 对不上**：C# 设 `_Sample`，但 AddShader 里属性叫 `_SampleRate` → 值永远是默认 `1.0`，权重恒为 `1/2`，每帧 50/50 混合，永不收敛。**shader 属性名必须和 `SetFloat/SetVector` 的字符串逐字一致**。
+* **没有收敛缓冲，累加结果直接 blit 到屏幕**：用两参 `Blit(_target, _addMaterial)` 把结果画到屏幕，没有任何纹理保存历史 → 下一帧无「历史累积」可读，收敛无从谈起。必须引入 `_converged` 并用三参 `Blit(src, dest, mat)`。
+* **`transform.hasChanged` 不可靠**：挂了移动脚本后，`Controller` 每帧写 `transform.position`（即使加零向量），也会把 `hasChanged` 置 true → 采样计数每帧清零，永远累积不起来。改为**手动比较上一帧的 position/rotation**判断相机是否真的动了。
+
 # 后续学习计划
 
 > 随学习进度持续维护，做到哪补到哪。
 
 * [x] Compute Shader 里搭建相机射线（从 `_CameraToWorld` / `_CameraInverseProjection` 生成 ray）
-* [ ] 地面平面 + 球体求交，输出法线可视化
+* [x] 地面平面 + 球体求交，输出法线可视化
+* [x] 天空盒采样（equirectangular 2D 全景图，非 Cubemap）
+* [x] 渐进式抗锯齿（亚像素抖动 + 收敛缓冲加权平均）
 * [ ] 反射与多次弹射（累积 + 逐帧收敛降噪）
-* [ ] 天空盒采样
 * [ ] 性能：分辨率缩放、线程组尺寸调优
 * [ ] 评估迁移到 ScriptableRendererFeature 的正统做法
+
+## 配套：相机控制器 Controller.cs
+
+飞行相机 MVP，用于验证射线/天空盒随视角实时变化：
+
+* 鼠标左键拖拽旋转（yaw + pitch，pitch 限 ±89° 防翻转）
+* WASD 沿 `transform.forward`/`transform.right` 移动，`dir.normalized * (speed * Time.deltaTime)` 保证斜向不加速、帧率无关
+* 注意：它每帧写 `transform.position` 会触发上面第三个坑
 
 #Renderer
