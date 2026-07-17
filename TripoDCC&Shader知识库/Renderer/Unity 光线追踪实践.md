@@ -179,16 +179,86 @@ Graphics.Blit(_accumulate, (RenderTexture)null);   // 再显示到屏幕
 * **在屏幕上累积 → 一片灰**：把累积 blit 到屏幕（swapchain 不保留上一帧、Metal 默认不 load），硬件混合读到的历史值是常量，运行平均收敛到常数。见上一节「关键教训」，改成累积到自己持有的 `_accumulate` RT 再显示。
 * **`transform.hasChanged` 不可靠**：挂了移动脚本后，`Controller` 每帧写 `transform.position`（即使加零向量），也会把 `hasChanged` 置 true → 采样计数每帧清零，永远累积不起来。改为**手动比较上一帧的 position/rotation**判断相机是否真的动了。
 
+# 进展：反射与方向光着色
+
+在 `Shade` 里做两件事：往光源发 shadow ray 算硬阴影，反射方向继续弹射（`CSMain` 里循环 8 次，`ray.energy` 逐次乘 specular 衰减，归零就 break）。
+
+```hlsl
+// 反射：交点沿法线偏移一点避免自相交，方向用 reflect，能量乘 specular
+ray.origin = hit.position + hit.normal*0.001f;
+ray.direction = reflect(ray.direction, hit.normal);
+ray.energy *= hit.specular;
+// shadow ray：朝光源发，打中任何东西就是阴影
+Ray shadowRay = CreateRay(hit.position + hit.normal*0.001f, -_LightDir.xyz);
+if(Trace(shadowRay).distance != 1.#INF) return float3(0,0,0);
+// 漫反射：N·L，注意 _LightDir 是照射方向要取反
+return saturate(dot(hit.normal, -_LightDir.xyz)) * _LightDir.w * hit.albedo;
+```
+
+坑：
+
+* **材质要从交点读，别在 Shade 里写死**：一开始 `albedo`/`specular` 写成局部常量，结果所有球一个色。必须用 `hit.albedo`/`hit.specular`（由 `IntersectSphere` 从球体数据带回来）。**写死的默认值会悄悄盖掉传进来的数据，排查时先看是不是没读传入值。**
+* **`_LightDir` 是「照射方向」，算 N·L 和 shadow ray 都要取反**：C# 传的是 `light.transform.forward`（光射出的方向），指向光源要 `-_LightDir.xyz`。
+* **`_LightDir` 每帧在 `SetShaderParameters` 里更新是对的，但灯光转动看不到变化 → 累积糊住**：和相机不动时的道理一样，`Update` 里要额外比较光源 rotation，变了就 `_currentSample=0`，否则新光照被历史帧平均淹没。
+
+# 进展：多球体（ComputeBuffer + 结构体对齐）
+
+需求：C# 控制球体数量，shader 一个循环遍历。普通 uniform 传不了变长数组，用 **ComputeBuffer**。数据流：
+
+```
+C# Sphere[] → ComputeBuffer(count, stride) → SetBuffer → GPU
+                                                  ↓
+shader: StructuredBuffer<Sphere> _Spheres  →  Trace() for 循环
+```
+
+## 最大的坑：C#/shader 的 struct 必须逐字段对齐，stride 要手算
+
+两边各定义一个 `Sphere`，字段顺序、类型必须**完全一致**：
+
+```csharp
+// C#（全是 4 字节 float 字段，Sequential 布局无填充 = 40 字节）
+struct Sphere { public Vector3 position; public float radius; public Vector3 albedo; public Vector3 specular; }
+```
+```hlsl
+// shader
+struct Sphere { float3 position; float radius; float3 albedo; float3 specular; };
+```
+
+* **stride 手算**：3+1+3+3 = 10 floats × 4 = **40 字节**，`new ComputeBuffer(count, sizeof(float)*10)`。写错（比如沿用 `Vector4` 时代的 16）→ 运行时报 stride 不匹配或读出乱数据。
+* **加字段两边必须同步改**，且警惕 HLSL 的 16 字节对齐规则可能插填充——目前这个布局刚好不触发，但不是永远安全。
+* **`struct Sphere` 定义结尾漏分号** → shader 编译失败，所有 kernel 失效（同 [[#进展：相机射线构建]] 那个逗号坑，编译错先查语法）。
+
+## 其它坑
+
+* **重叠剔除别直接丢弃**：最初逻辑是位置重叠就 `continue`，被丢的球不补生成 → 请求 10 个只剩 2 个。改成**每个球重试最多 20 次**找不重叠位置，试满才放弃。
+* **传 shader 的数量要用「实际生成数」`_actualCount`，不是请求数 `sphereCount`**：剔除后实际更少，用 `sphereCount` 会让 `_NumSpheres` 越界读 buffer。
+* **`ComputeBuffer` 必须 `OnDisable` 手动 `Release()`**：非托管资源，不释放 Unity 每次退 Play 报泄漏警告。
+* **误入 `using UnityEditor.*` 会导致打包失败**：IDE 自动补全常引入 `UnityEditor.Experimental.GraphView` 之类，运行时脚本不能引用 UnityEditor 命名空间。
+
+## 动态更新与「静态收敛」的取舍（已回退为静态）
+
+一度加过实时更新（每帧 `SetData` 让球动、Inspector 拖数量实时重建），但发现和渐进式累积**根本冲突**：球每帧变就必须每帧 `_currentSample=0`，等于放弃累积降噪，画面永远是带噪单帧。**动态场景 vs 累积收敛是固有矛盾**（真要动态降噪得上 TAA 时域重投影，另一个话题）。
+
+最终回退为**静态**：球体只在 `OnEnable` 生成一次，改数量/参数后重进 Play 生效。避免了「OnEnable 生成 + Update 重建」两套逻辑打架。
+
 # 后续学习计划
 
 > 随学习进度持续维护，做到哪补到哪。
+
+## 第一阶段完成（URP 下从零到多球体路径追踪）
 
 * [x] Compute Shader 里搭建相机射线（从 `_CameraToWorld` / `_CameraInverseProjection` 生成 ray）
 * [x] 地面平面 + 球体求交，输出法线可视化
 * [x] 天空盒采样（equirectangular 2D 全景图，非 Cubemap）
 * [x] 渐进式抗锯齿（亚像素抖动 + 收敛缓冲加权平均）
-* [ ] 反射与多次弹射（累积 + 逐帧收敛降噪）
+* [x] 反射与多次弹射（`ray.energy` 衰减 + 逐帧收敛降噪）
+* [x] 方向光 + shadow ray 硬阴影
+* [x] 多球体（ComputeBuffer + struct 对齐），随机材质（金属/漫反射）
+
+## 下一阶段
+
 * [ ] 性能：分辨率缩放、线程组尺寸调优
+* [ ] 更丰富的材质（粗糙度、能量守恒的重要性采样）
 * [ ] 评估迁移到 ScriptableRendererFeature 的正统做法
 
 ## 配套：相机控制器 Controller.cs
