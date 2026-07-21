@@ -7,4 +7,10 @@
 .DS_Store
 .trash/
 
+# 代码实操 lab：构建产物 / 依赖不入库（会污染 Obsidian 索引与同步）
+**/node_modules/
+**/dist/
+**/.vite/
+*.log
+
 # 保留：主题、插件、快捷键等配置会被提交，换机可还原

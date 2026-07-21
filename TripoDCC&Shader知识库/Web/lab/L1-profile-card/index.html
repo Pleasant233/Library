@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<!-- L1 静态个人名片 · 纯 HTML+CSS，无 JS/框架/依赖。双击本文件即可在浏览器打开 -->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>个人名片 · L1</title>
+  <!-- 外链样式表：结构(本文件) 与 样式(style.css) 分离，最规范的挂载方式 -->
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!--
+    嵌套 = 父子关系 = DOM 树 = 引擎里的 Hierarchy。
+    下面这层层缩进，浏览器读成一棵树：body > .card > (img / h1 / p / .tags / button)
+  -->
+  <main class="card">
+    <!-- 头像：border-radius:50% 在 CSS 里把方图裁成圆形 -->
+    <img class="avatar" src="https://i.pravatar.cc/160" alt="头像" />
+
+    <h1 class="name">舒淇 · Graphics Dev</h1>
+
+    <p class="bio">写 shader 的人，正在把游戏图形经验迁移到 Web 前端。</p>
+
+    <!-- .tags 是容器，里面 3 个 class="tag" 的小牌子 -->
+    <div class="tags">
+      <span class="tag">HLSL</span>
+      <span class="tag">C++</span>
+      <span class="tag">WebGL</span>
+    </div>
+
+    <button class="btn">联系我</button>
+  </main>
+</body>
+</html>

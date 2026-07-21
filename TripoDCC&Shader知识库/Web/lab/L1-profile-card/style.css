@@ -1,0 +1,86 @@
+/*
+  L1 名片样式表。给零前端基础的图形程序员看：
+  每个元素在浏览器里都是一个「盒子」，盒子由内到外 4 层：
+    content(内容) → padding(内边距,撑开内部) → border(边框) → margin(外边距,把别人推开)
+  这就是「盒模型」。下面注释会标出每处用的是哪一层。
+*/
+
+/* 全局清零：浏览器默认给 body 留了 margin，先抹平，避免莫名其妙的白边 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box; /* 让 width 包含 padding+border，尺寸更好算 */
+}
+
+body {
+  min-height: 100vh;      /* 占满整屏高度，才能垂直居中 */
+  /* flex 居中三件套：容器变 flex 后，主轴 justify、交叉轴 align 都居中 */
+  display: flex;
+  justify-content: center; /* 水平居中：删掉它，卡片会靠左 */
+  align-items: center;     /* 垂直居中 */
+  background: linear-gradient(135deg, #1e293b, #0f172a);
+  font-family: -apple-system, "PingFang SC", system-ui, sans-serif;
+}
+
+.card {
+  width: 320px;
+  padding: 24px;          /* 内边距：撑开卡片内部，改成 48px 会明显变空变大 */
+  border-radius: 20px;    /* 圆角：改成 0 就变方块 */
+  background: #ffffff;
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35); /* 阴影，制造悬浮感 */
+  text-align: center;
+}
+
+.avatar {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;     /* 关键：50% 把方图裁成圆。删掉就变方头像 */
+  object-fit: cover;      /* 图片按比例填满不变形 */
+  border: 3px solid #e2e8f0; /* border 层：头像外一圈描边 */
+}
+
+.name {
+  margin-top: 14px;       /* margin 层：把名字往下推，和头像拉开距离 */
+  font-size: 20px;
+  color: #0f172a;
+}
+
+.bio {
+  margin-top: 8px;
+  font-size: 14px;
+  color: #64748b;
+  line-height: 1.6;
+}
+
+/* 标签容器：又是一个 flex，让 3 个标签横排且能自动换行、居中 */
+.tags {
+  display: flex;
+  gap: 8px;               /* 标签之间的间隙 */
+  justify-content: center;
+  flex-wrap: wrap;
+  margin: 16px 0;
+}
+
+.tag {
+  padding: 4px 12px;      /* 小 padding 把牌子撑成胶囊 */
+  border-radius: 999px;   /* 超大圆角 = 胶囊形 */
+  background: #e0f2fe;    /* 改这个颜色，只有标签变色 */
+  color: #0369a1;
+  font-size: 12px;
+}
+
+.btn {
+  width: 100%;
+  padding: 12px;
+  border: none;
+  border-radius: 12px;
+  background: #2563eb;
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;        /* 鼠标移上去变成手型，暗示可点 */
+  transition: background 0.2s;
+}
+
+.btn:hover {
+  background: #1d4ed8;    /* :hover = 悬停时的样式 */
+}
