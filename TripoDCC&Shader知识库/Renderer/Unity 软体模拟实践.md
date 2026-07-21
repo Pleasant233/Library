@@ -59,15 +59,30 @@
 
 > 教训：位置型体积约束不该给刚体引入净平移（要 COM 守恒）；且**约束的作用集合必须和它的度量集合一致**，否则会引入你意想不到的耦合。
 
-# 渲染：球形法线 + 质心球心
+## 摩擦子步复利：约束按子步数归一化
 
-软体形变让 mesh 顶点法线变脏，菲涅尔边缘光斑驳。改用**几何球形法线**：`normalize(worldPos - center)`，从中心指向表面点的径向方向，无视形变始终干净。
+摩擦 `frictionScale = 1 - groundFriction` 在每个子步的 `UpdateVelocities` 施加，而每帧跑多个子步（默认 4）。底部横向速度 N 子步后剩 `(1-friction)^N`——被过度钉死，而顶部不接触地面不受摩擦、继续前移 → 剪切拉伸 = 落地拖尾（「破麻袋」）。
 
-* 球心不能用 `unity_ObjectToWorld` 原点——物理质点在世界空间独立演化，`transform` 并不跟随质心移动，会脱节。
-* 也**不要**去改 `UpdateMesh` 让 transform 跟随质心（试过，导致穿模——破坏了顶点写回的坐标一致性，已回退）。
-* 正解：C# 每帧用 `MaterialPropertyBlock` 把真实质心 `_focusPoint` 作为 `_Center` 传给 shader 当球心。不碰顶点逻辑、不实例化材质、无 GC。
+修法：`frictionScale = pow(1 - groundFriction, 1/substeps)`，N 子步累乘正好回到 `(1-groundFriction)`，与子步数无关。`substeps` 顺着 `Simulate → Step → UpdateVelocities` 传下去。
 
-> 教训：物理表示（世界空间质点）和 Transform 表示脱节时，优先**把物理量传给需要它的地方**（shader 参数），而不是强行让 Transform 去追物理——后者容易破坏依赖 Transform 的其它逻辑（顶点写回、碰撞查询）。
+> 教训：任何**每子步施加的乘性衰减**（摩擦、阻尼）都会随子步数复利。要么按 `1/substeps` 开方，要么每帧只施加一次。改子步数不该改变物理手感——这是子步无关性的基本要求。
+
+## 体积度量：签名四面体网格体积，替代球近似
+
+原来的体积估计用「surface 质点到质心的平均距离 → 球体积」。落地压扁时 surface 分布很不均匀，这个估计每帧剧烈波动 → 收缩/扩张振荡。
+
+改为**签名四面体和**：对每个表面三角形，`signedVolume += dot(a, cross(b,c))/6`（a/b/c 为三角顶点相对质心），取 abs。这是真实的闭合网格体积，形变下稳定。
+
+**关键**：rest volume 和 runtime volume 必须用**同一个公式**（`SlimeTopology.CalculateClosedSurfaceVolume` 和 `CpuSlimeSolver.CalculateSurfaceVolume` 一致），否则 `restVol/curVol` 比值有恒定偏差，rest 状态不落在 scale 1.0。CPU/GPU 两端也要同步。
+
+# 渲染与表情（拆分到独立笔记）
+
+软体的表面渲染和表情较复杂，各自成篇：
+
+* **半透明果冻 shader**（双 pass 自穿插、双向菲涅尔、深度 Rim、精灵动画、材质序列化坑）→ [[Unity 半透明果冻 Shader]]
+* **程序化表情系统**（billboard 脸、SDF 眼睛、眨眼、为何独立组件）→ [[Unity 程序化表情系统]]
+
+其中**球形法线 + 质心球心**是连接物理与渲染的关键（球心用 `MaterialPropertyBlock` 传质心，不让 transform 追物理），详见 shader 笔记。
 
 # GPU 后端要点（compute 求解器 review 结论）
 
@@ -83,9 +98,13 @@
 
 # 后续
 
-* [ ] GPU 后端的 3 个 major（构造函数资源泄漏、surface 索引假设 vs `_IsSurface` flag、weld 组互斥不变量）修复
+* [x] GPU 后端的 3 个 major（构造函数资源泄漏、surface 索引假设、weld 组互斥不变量）修复
+* [x] 自碰撞 O(n²) 的空间哈希优化（均匀网格 + 链表桶）
+* [x] 摩擦子步无关化、全体质点地面碰撞、签名四面体体积
 * [ ] CPU / GPU 约束顺序 side-by-side 对齐，避免 Auto 切后端手感跳变
+* [ ] `ApplyVelocityCohesion` 确认是否需要子步归一化（当前在 substep 循环外全 dt 调用）
+* [ ] GPU `_SurfaceTriangleIndices` 隐式不变量加注释（依赖 surface 恒等映射到全局前段）
+* [ ] compute `CSReduceSurface` 死代码清理（min/maxY + tangentRadius 不再被读）
 * [ ] 更真实的碰撞（任意 collider、软体间碰撞）
-* [ ] 自碰撞 O(n²) 的空间哈希优化
 
 #Renderer
