@@ -1,272 +1,403 @@
-# 前置
+# Unity 光线追踪实践
 
-> 个人自学项目，对应 [[任务需求]] 7.16 个人项的「unity光线追踪」。
-> 目标：在 Unity 里用 **Compute Shader** 手写光线追踪，跟的是经典的 *GPU Ray Tracing in Unity*（Three Eyed Games）系列教程。
-> 教程基于 **Built-in 管线**，但本项目工程是 **URP 14.0.12 / Unity 2022**，所以第一道坎就是把教程的后处理入口迁移到 URP。着色器管线本身（顶点→图元→片元、RT、Dispatch）你已经会，这里主要是 Unity 侧的 API 外壳。
+> **项目定位**：跟随 *GPU Ray Tracing in Unity*（Three Eyed Games）教程，在 Unity URP 14 / Unity 2022 里用 Compute Shader 手写路径追踪。教程基于 Built-in 管线，本篇记录迁移到 URP 时遇到的所有坑与解法。
+>
+> - 工程路径：`/Users/vast/DccDev/Unity Project/Graphics Learning`
+> - 核心脚本：`Assets/Scripts/Raytracing.cs`（挂在 Camera 上）
+> - Compute Shader：`Assets/Shader/RayTracingCS.compute`
 
-* 本地工程：`/Users/vast/DccDev/Unity Project/Graphics Learning`
-* 核心脚本：`Assets/Raytracing.cs`（挂在 Camera 上）
-* 计算着色器：`Assets/NewComputeShader.compute`
-* 相关：[[09 前端接WebGL]]（同为「已懂 shader，换一层 API 外壳」的迁移场景）
+---
 
-# 核心踩坑：URP 没有 OnRenderImage
+## 整体架构
 
-这是本次实践最关键的一条，卡了最久：**脚本挂上相机、Compute Shader 也拖进去了、Console 不报错，但画面毫无变化。**
+```mermaid
+flowchart LR
+    A[Camera\nRaytracing.cs] -->|订阅 endCameraRendering| B[每帧 Render]
+    B --> C[SetShaderParameters\n传矩阵/球体/灯光]
+    C --> D[Dispatch\nRayTracingCS.compute]
+    D --> E[_target RT\n本帧结果]
+    E -->|Graphics.Blit + AddShader| F[_accumulate RT\n累积缓冲]
+    F -->|Graphics.Blit| G[屏幕]
 
-## 根因
+    style D fill:#1e3a5f,color:#fff
+    style F fill:#2d4a1e,color:#fff
+```
 
-`OnRenderImage` / `OnPreRender` / `OnPostRender` 这套后处理回调是 **Built-in 管线专属**的。URP 把它们全部移除了，所以方法根本不会被 Unity 调用——不是代码错，是入口失效。
+---
 
-> 判断项目是不是 URP：看 `ProjectSettings/GraphicsSettings.asset` 的 `m_CustomRenderPipeline` 是否指向一个 SRP 资产，或 `Packages/manifest.json` 里是否有 `com.unity.render-pipelines.universal`。
+## 第一道坎：URP 没有 `OnRenderImage`
 
-顺带澄清另一个易混点：教程里的 `Render()` **不是 Unity 内置方法**，是教程自定义的，需要自己写；`OnRenderImage`（不是 `OderImage`）才是内置回调，且它在 URP 下才失效，Built-in 下依然可用。
+这是本次实践卡最久的问题。**脚本挂好、Compute Shader 也拖进去了、Console 不报错，画面毫无变化。**
 
-## 解法对比
+### 根因
 
-| 方案 | 改动量 | 说明 |
-| --- | --- | --- |
-| **RenderPipelineManager 回调**（本项目采用） | 小 | 订阅 `endCameraRendering` 事件替代 `OnRenderImage`，教程的 `Render`/`InitRenderTexture` 逻辑几乎原样保留，最快看到画面 |
-| 切回 Built-in 管线 | 小 | 教程代码一字不改，但会失去 URP 功能和现有 URP 场景设置 |
-| ScriptableRendererFeature | 大 | URP 官方正统做法，最贴近工程实践，学习曲线陡 |
+```mermaid
+flowchart TD
+    A["OnRenderImage / OnPreRender\n/ OnPostRender"] -->|属于| B[Built-in 管线专属回调]
+    B -->|URP 移除了这套回调| C["方法永远不被 Unity 调用\n不是代码错，是入口失效"]
+    C --> D{解法}
+    D --> E["✅ RenderPipelineManager.endCameraRendering\n（本项目采用）"]
+    D --> F["切回 Built-in 管线\n教程代码一字不改"]
+    D --> G["ScriptableRendererFeature\nURP 正统做法，学习曲线陡"]
+```
 
-# 实现：RenderPipelineManager 事件回调
+> [!tip] 判断项目是否 URP
+> 看 `ProjectSettings/GraphicsSettings.asset` 的 `m_CustomRenderPipeline` 是否指向 SRP 资产，或 `Packages/manifest.json` 里是否有 `com.unity.render-pipelines.universal`。
 
-思路：在 `OnEnable`/`OnDisable` 订阅/取消订阅 `RenderPipelineManager.endCameraRendering`，事件在每台相机渲染结束后触发，用缓存的相机引用过滤，只处理挂脚本的这台相机。
+### 解法：订阅 `endCameraRendering`
 
 ```csharp
-using UnityEngine;
-using UnityEngine.Rendering;   // RenderPipelineManager / ScriptableRenderContext 在这个命名空间
-
+// Assets/Scripts/Raytracing.cs
 [RequireComponent(typeof(Camera))]
 public class Raytracing : MonoBehaviour
 {
-    public ComputeShader RayTracingShader;
-    private RenderTexture _target;
     private Camera _camera;
 
     private void Awake() => _camera = GetComponent<Camera>();
 
-    private void OnEnable()  => RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
-    private void OnDisable() => RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
+    // 成对订阅/取消，缺一不可——脚本禁用后回调若仍在跑会报错
+    private void OnEnable()
+    {
+        SetupSpheres();
+        RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
+    }
+
+    private void OnDisable()
+    {
+        RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
+        _sphereBuffer?.Release();   // ComputeBuffer 是非托管资源，必须手动释放
+        _sphereBuffer = null;
+    }
 
     private void OnEndCameraRendering(ScriptableRenderContext context, Camera camera)
     {
-        if (camera != _camera) return;   // 只处理本相机，避免影响 Scene 视图等其它相机
+        if (camera != _camera) return;  // 过滤：只处理本相机，Scene 视图等不干扰
+        SetShaderParameters();
         Render();
-    }
-
-    private void Render()
-    {
-        InitRenderTexture();
-        RayTracingShader.SetTexture(0, "Result", _target);
-        int gx = Mathf.CeilToInt(Screen.width  / 8.0f);
-        int gy = Mathf.CeilToInt(Screen.height / 8.0f);
-        RayTracingShader.Dispatch(0, gx, gy, 1);
-        Graphics.Blit(_target, (RenderTexture)null);   // null = 当前相机目标（屏幕）
-    }
-
-    private void InitRenderTexture()
-    {
-        if (_target == null || _target.width != Screen.width || _target.height != Screen.height)
-        {
-            if (_target != null) _target.Release();
-            _target = new RenderTexture(Screen.width, Screen.height, 0,
-                RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear);
-            _target.enableRandomWrite = true;   // Compute Shader 随机写入必须开
-            _target.Create();
-        }
     }
 }
 ```
 
-## 要点
+> [!note] 关键细节
+> `[RequireComponent(typeof(Camera))]` + `Awake` 缓存相机，既保证脚本只能挂在相机上，又避免每帧 `GetComponent`。
 
-* **必须成对订阅/取消订阅**事件，否则脚本禁用后回调仍在跑，会报错或重复执行。
-* `Graphics.Blit(src, (RenderTexture)null)`：URP 下 `null` 目标表示画到当前相机的渲染目标（屏幕）。注意要显式转型 `(RenderTexture)null` 消歧义。
-* `[RequireComponent(typeof(Camera))]` + `Awake` 缓存相机，既保证脚本只挂相机，又避免每帧 `GetComponent`。
-* `RenderTextureFormat.ARGBFloat`：HDR 浮点，适合光追累积；`enableRandomWrite = true` 是 Compute Shader 能写入的前提，漏了就是黑屏。
+---
 
-# Compute Shader 侧的对齐约定
+## 渲染目标与 RenderTexture
 
-脚本用 `SetTexture(0, "Result", _target)` + `Dispatch(0, ...)`，所以 `.compute` 必须满足：
+```csharp
+private RenderTexture CreateRT(bool randomWrite)
+{
+    var rt = new RenderTexture(Screen.width, Screen.height, 0,
+        RenderTextureFormat.ARGBFloat,      // HDR 浮点，适合光追累积
+        RenderTextureReadWrite.Linear)
+    {
+        enableRandomWrite = randomWrite     // Compute Shader 写入的前提，漏了就黑屏
+    };
+    rt.Create();
+    return rt;
+}
+```
 
-* 输出变量名是 **`Result`**，类型 `RWTexture2D<float4>`
-* 目标是**第 0 个 kernel**（`#pragma kernel` 的第一个）
-* 线程组 `[numthreads(8,8,1)]`，和脚本里的 `/8.0f` 对应
+| RT | 用途 | `enableRandomWrite` |
+|---|---|---|
+| `_target` | Compute Shader 每帧覆写 | ✅ 必须开 |
+| `_accumulate` | 硬件混合做运行平均 | ❌ 不需要 |
 
-黑屏排查时先用「渐变测试色」确认管线通不通，再写真正的光追逻辑：
+> [!warning] 黑屏常见原因
+> 漏设 `enableRandomWrite = true`，或 `RenderTextureFormat` 用了不支持随机写入的格式。
+
+---
+
+## Compute Shader 侧：射线生成
+
+### 像素 → 世界射线
+
+```mermaid
+flowchart LR
+    A["像素 id.xy\n整数坐标"] -->|"+ 抖动 / 分辨率 * 2 - 1"| B["NDC 坐标\n[-1, 1]"]
+    B -->|"_CameraInverseProjection"| C["相机空间方向"]
+    C -->|"_CameraToWorld（只转方向 w=0）"| D["世界空间射线方向"]
+    A2["相机空间原点\n(0,0,0,1)"] -->|"_CameraToWorld（转位置 w=1）"| E["世界空间 origin"]
+```
 
 ```hlsl
-#pragma kernel CSMain
-RWTexture2D<float4> Result;
+// Assets/Shader/RayTracingCS.compute
+Ray CreateCameraRay(float2 uv)
+{
+    // w=1：转位置（含平移）
+    float3 origin = mul(_CameraToWorld, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
+    // 逆投影矩阵把 NDC → 相机空间
+    float3 direction = mul(_CameraInverseProjection, float4(uv, 0.0, 1.0)).xyz;
+    // w=0：转方向（不含平移）
+    direction = mul(_CameraToWorld, float4(direction, 0.0f)).xyz;
+    direction = normalize(direction);
+    return CreateRay(origin, direction);
+}
+```
 
+> [!warning] 高频坑：矩阵名和内容必须一致
+> C# 变量叫 `_CameraInverseProjection`，就必须传 `projectionMatrix.inverse`（逆矩阵）。传成 `projectionMatrix` 本身不报错，但射线方向全错——**这种错误只有渲染结果才能暴露，编译期无法发现**。
+
+```csharp
+// 每帧更新相机矩阵
+private void SetShaderParameters()
+{
+    RayTracingShader.SetMatrix("_CameraToWorld",          _camera.cameraToWorldMatrix);
+    RayTracingShader.SetMatrix("_CameraInverseProjection", _camera.projectionMatrix.inverse);
+    // ...
+}
+```
+
+---
+
+## 路径追踪主循环
+
+```hlsl
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    _Pixel = id.xy;
+    uint width, height;
+    Result.GetDimensions(width, height);
+
+    // 像素中心 + 随机亚像素抖动 → NDC
+    float2 uv = float2((id.xy + _PixelOffset * _AntiScale) / float2(width, height) * 2.0f - 1.0f);
+    Ray ray = CreateCameraRay(uv);
+
+    float3 color = float3(0, 0, 0);
+    for (int i = 0; i < 8; i++)        // 最多 8 次弹射
+    {
+        RayHit hit = Trace(ray);
+        color += ray.energy * Shade(ray, hit);
+        if (!any(ray.energy)) break;   // 能量归零提前退出
+    }
+
+    // Reinhard tone mapping：防止 HDR 溢出
+    Result[id.xy] = float4(color / (color + 1.0f), 1.0f);
+}
+```
+
+### 球体求交
+
+```hlsl
+void IntersectSphere(Ray ray, inout RayHit bestHit, Sphere sphere)
+{
+    float3 d = ray.origin - sphere.position;
+    float p1 = -dot(ray.direction, d);
+    float p2sqr = p1 * p1 - dot(d, d) + sphere.radius * sphere.radius;
+    if (p2sqr < 0) return;             // 判别式 < 0：不相交
+
+    float p2 = sqrt(p2sqr);
+    float t = p1 - p2 > 0 ? p1 - p2 : p1 + p2;   // 取近交点
+    if (t > 0 && t < bestHit.distance)
+    {
+        bestHit.distance = t;
+        bestHit.position = ray.origin + ray.direction * t;
+        bestHit.normal   = normalize(bestHit.position - sphere.position);
+        // 从 buffer 读材质，不能写死，否则所有球同色
+        bestHit.albedo   = sphere.albedo;
+        bestHit.specular = sphere.specular;
+    }
+}
+```
+
+---
+
+## 渐进式抗锯齿（Progressive AA）
+
+### 原理
+
+每帧随机偏移采样位置（亚像素抖动），用运行平均把多帧结果收敛——相机静止时噪点逐渐消失，相机移动时重置计数。
+
+```mermaid
+flowchart LR
+    A["第 n 帧\n_target"] -->|"AddShader\nalpha = 1/(n+1)"| B["_accumulate RT\n运行平均"]
+    B -->|"Graphics.Blit"| C[屏幕]
+
+    note1["公式：\ndst_new = 本帧·1/(n+1)\n      + dst_old·n/(n+1)"]
+```
+
+### 为什么不能在屏幕上直接累积
+
+> [!warning] macOS / Metal 平台陷阱
+> 教程原版 `Graphics.Blit(_target, destination, _addMaterial)` 直接往 `OnRenderImage` 给的屏幕 `destination` 上累积，**依赖「帧缓冲保留上一帧内容」这个 DX11 行为**。macOS Metal 的 swapchain 多缓冲轮换 + tile 架构默认不 load 旧内容 → 混合读到的历史值是垃圾 → 运行平均收敛到常数 → **整屏一片灰**。
+>
+> 修法：累积到自己持有的 `_accumulate` RT，它作为渲染目标时硬件会 load 旧内容。
+
+```csharp
+private void Render()
+{
+    InitRenderTexture();
+
+    // 1) Compute Shader 画本帧（带随机抖动）进 _target
+    RayTracingShader.SetTexture(0, "Result", _target);
+    int gx = Mathf.CeilToInt(Screen.width  / 8.0f);
+    int gy = Mathf.CeilToInt(Screen.height / 8.0f);
+    RayTracingShader.Dispatch(0, gx, gy, 1);
+
+    if (_addMaterial == null)
+        _addMaterial = new Material(Shader.Find("Hidden/AddShader"));
+
+    // 2) 硬件混合：本帧 → _accumulate（保留旧内容的自持 RT）
+    _addMaterial.SetFloat("_Sample", _currentSample);
+    Graphics.Blit(_target, _accumulate, _addMaterial);
+
+    // 3) 显示累积结果
+    Graphics.Blit(_accumulate, (RenderTexture)null);
+
+    _currentSample++;
+}
+```
+
+### 三个叠加坑（累积 AA 完全不生效）
+
+> [!warning] 坑 1：属性名字符串不一致
+> C# 设 `_Sample`，但 AddShader 里写的是 `_SampleRate` → 值永远是 shader 的默认值 `1.0`，权重恒为 `1/2`，每帧 50/50 混合，永不收敛。**`SetFloat` / `SetVector` 的字符串必须和 shader 属性名逐字一致。**
+
+> [!warning] 坑 2：在屏幕上累积 → 一片灰
+> 见上节"macOS / Metal 平台陷阱"。
+
+> [!warning] 坑 3：`transform.hasChanged` 不可靠
+> 挂了 `Controller.cs` 之后，它每帧写 `transform.position`（即使加零向量）也会把 `hasChanged` 置 `true` → 采样计数每帧清零，永远累积不起来。改为**手动比较上一帧的 position / rotation**：
+
+```csharp
+private void Update()
+{
+    if (transform.position != _lastPos || transform.rotation != _lastRot)
+    {
+        _currentSample = 0;
+        _lastPos = transform.position;
+        _lastRot = transform.rotation;
+    }
+    if (mainlight != null && mainlight.transform.rotation != _lastLightRot)
+    {
+        _currentSample = 0;
+        _lastLightRot = mainlight.transform.rotation;
+    }
+}
+```
+
+---
+
+## 多球体：ComputeBuffer + 结构体对齐
+
+### 数据流
+
+```mermaid
+flowchart LR
+    A["C# Sphere[]\nposition/radius\nalbedo/specular"] -->|"new ComputeBuffer\n(count, stride=40)"| B[GPU Buffer]
+    B -->|SetBuffer| C["shader\nStructuredBuffer<Sphere> _Spheres"]
+    C -->|"for i < _NumSpheres"| D["Trace() 遍历求交"]
+```
+
+### 最大坑：C# / HLSL 结构体必须逐字段对齐
+
+```csharp
+// C#（Sequential 布局，无填充，10 个 float = 40 字节）
+struct Sphere
+{
+    public Vector3 position;  // 3 floats
+    public float   radius;    // 1 float
+    public Vector3 albedo;    // 3 floats
+    public Vector3 specular;  // 3 floats
+}
+
+// stride 手算：3+1+3+3 = 10 × 4 = 40 字节
+_sphereBuffer = new ComputeBuffer(_actualCount, sizeof(float) * 10);
+```
+
+```hlsl
+// HLSL（字段顺序、类型必须和 C# 完全一致）
+struct Sphere
+{
+    float3 position;
+    float  radius;
+    float3 albedo;
+    float3 specular;
+};
+StructuredBuffer<Sphere> _Spheres;
+```
+
+> [!warning] 加字段时两边必须同步
+> HLSL 有 16 字节对齐规则，某些字段顺序会插入填充。当前布局刚好不触发，但换顺序或加字段后要重新验证 stride。写错 stride → 运行时报错或 GPU 读出乱数据。
+
+### 球体生成：重叠用重试而非丢弃
+
+```csharp
+// 每个球最多试 20 次找不重叠的位置，避免「请求 10 个只生成 2 个」
+for (int attempt = 0; attempt < 20; attempt++)
+{
+    Vector2 pos = Random.insideUnitCircle * spawnRadius;
+    sphere.position = new Vector3(pos.x, radius, pos.y);   // y=radius 落在地面
+    bool overlap = false;
+    foreach (Sphere other in spheres)
+    {
+        float minDist = sphere.radius + other.radius;
+        if (Vector3.SqrMagnitude(sphere.position - other.position) < minDist * minDist)
+        { overlap = true; break; }
+    }
+    if (!overlap) { placed = true; break; }
+}
+if (!placed) continue;  // 试满才放弃
+```
+
+> [!note] 传给 shader 的数量用 `_actualCount`
+> 剔除重叠后实际生成数可能少于请求数。用请求数 `sphereCount` 当 `_NumSpheres` 会让 shader 越界读 buffer。
+
+---
+
+## Shader 编译错误的通用排查
+
+> [!warning] 编译错误会让所有 kernel 失效
+> 一个漏逗号（`float4(0.0f 0.0f, ...)`）→ shader 编译失败 → `Dispatch(0, ...)` 报 `Kernel at index (0) is invalid`。
+>
+> **看到「kernel index invalid」先去查 shader 语法，而不是怀疑 kernel 名或索引。**
+
+黑屏时的快速验证：用渐变测试色确认管线通不通，再写真正的光追逻辑：
+
+```hlsl
 [numthreads(8,8,1)]
 void CSMain (uint3 id : SV_DispatchThreadID)
 {
     uint w, h;
     Result.GetDimensions(w, h);
+    // 输出 UV 渐变，随视角变化说明射线和 Blit 都通了
     Result[id.xy] = float4(id.x / (float)w, id.y / (float)h, 0.2, 1);
 }
 ```
 
-# 已知待观察问题
+---
 
-* URP 相机若开了 **Post Processing**，`endCameraRendering` 之后的 Blit 时机可能和 URP 自身后处理叠加，出现闪烁。若遇到再考虑改用 `beginCameraRendering` 或走 ScriptableRendererFeature。
+## 阶段完成情况
 
-# 进展：相机射线构建
+### ✅ 第一阶段（URP 下多球体路径追踪）
 
-在 Compute Shader 里从屏幕像素反推出世界空间射线，输出 `ray.direction*0.5+0.5` 做方向可视化（屏幕出现随视角变化的彩色渐变即为通了）。
+- [x] URP 下 Compute Shader 接入（`RenderPipelineManager.endCameraRendering`）
+- [x] 相机射线构建（`_CameraToWorld` + `_CameraInverseProjection`）
+- [x] 地面平面 + 球体求交，法线可视化
+- [x] 天空盒采样（equirectangular 全景图）
+- [x] 渐进式 AA（亚像素抖动 + 自持 RT 加权平均）
+- [x] 反射 + 多次弹射（`ray.energy` 衰减 + 半球重要性采样）
+- [x] 方向光 + shadow ray 硬阴影
+- [x] 多球体（ComputeBuffer + struct 对齐，随机材质）
 
-两边配合：C# 传相机矩阵，shader 用矩阵把像素 → 世界射线。
+### 📌 下一阶段
 
-```csharp
-// Raytracing.cs：每帧把相机矩阵传给 shader
-private void SetShaderParameters()
-{
-    RayTracingShader.SetMatrix("_CameraToWorld", _camera.cameraToWorldMatrix);
-    RayTracingShader.SetMatrix("_CameraInverseProjection", _camera.projectionMatrix.inverse); // 注意 .inverse
-}
-```
+- [ ] 性能：分辨率缩放、线程组尺寸调优
+- [ ] 更丰富的材质（粗糙度、能量守恒的重要性采样）
+- [ ] 迁移到 `ScriptableRendererFeature`（URP 正统做法）
 
-```hlsl
-// origin = 相机位置（相机空间原点 → 世界）
-float3 origin = mul(_CameraToWorld, float4(0,0,0,1)).xyz;
-// 像素方向：先用逆投影矩阵回到相机空间，再转到世界空间
-float3 dir = mul(_CameraInverseProjection, float4(uv, 0, 1)).xyz;
-dir = normalize(mul(_CameraToWorld, float4(dir, 0)).xyz);
-```
+---
 
-其中 `uv` 是像素中心归一化到 `[-1,1]` 的 NDC 坐标：`(id.xy + 0.5) / 分辨率 * 2 - 1`。
-
-## 本次两个典型坑
-
-* **编译错误会让所有 kernel 失效**：`float4(0.0f 0.0f, ...)` 漏了个逗号 → shader 编译失败 → `Dispatch(0,...)` 报 `Kernel at index (0) is invalid`。看到「kernel index invalid」先去查 shader 有没有编译错，而不是怀疑 kernel 名或索引。
-* **矩阵名要和内容一致**：shader 变量叫 `_CameraInverseProjection`，C# 就必须传 `projectionMatrix.inverse`（逆矩阵），传成 `projectionMatrix` 本身不报错但射线方向全错。
-
-# 进展：渐进式抗锯齿（progressive AA）
-
-思路：每帧对像素采样位置加一个随机亚像素抖动 `_PixelOffset`，再把历帧结果**加权平均**收敛。相机不动时，锯齿随采样数增加而逐渐平滑；相机一动就清零重来。
-
-## 累积靠硬件混合，AddShader 只有一句
-
-`AddShader` 带 `Blend SrcAlpha OneMinusSrcAlpha`，片元输出 alpha = `1/(_Sample+1)`。硬件混合公式 `dst = src·a + dst·(1-a)` 代入即：
-
-```
-dst_new = 本帧 · 1/(n+1) + dst_old · n/(n+1)   // 运行平均
-```
-
-**累积是硬件在「目标 RT」上做的**，所以片元 shader 一句 `tex2D` 就够，教程原版也确实只有一句。前提是**目标 RT 会保留上一帧内容**。
-
-## 原文一行搞定，我这里为什么要改（关键教训）
-
-教程原版直接 `Graphics.Blit(_target, destination, _addMaterial)`，把累积做在 `OnRenderImage` 给的 `destination`（屏幕）上，一行搞定。**但这依赖「帧缓冲保留上一帧内容」这个平台相关假设**：
-
-* 教程环境 = Built-in + Windows/DX11，`destination` 恰好保留旧内容，取巧成立。
-* 本项目 = URP + macOS/Metal，且累积目标是屏幕（swapchain 多缓冲轮换 + Metal tile 架构默认不 load 旧内容）→ 混合读到的 `dst_old` 是常量垃圾 → 运行平均收敛到常数 → **整屏一片灰**。
-
-**修法（最小改动）**：别在屏幕上累积，改成累积到**自己持有的一张 RT**（`_accumulate`），它作渲染目标时硬件会 load 旧内容；再单独显示到屏幕。AddShader 一字不改，只多一张 RT：
-
-```csharp
-Graphics.Blit(_target, _accumulate, _addMaterial); // 累加进自己的 RT（保留旧内容）
-Graphics.Blit(_accumulate, (RenderTexture)null);   // 再显示到屏幕
-```
-
-> 教训：跟平台无关的算法（运行平均）没错，错的是**照搬了教程对帧缓冲行为的隐式假设**。换了管线/平台，先怀疑这类「谁保留内容、谁被清空」的时序假设。ping-pong 双缓冲能更保险地绕开，但对这个场景是过度设计——单张自持 RT 足够。
-
-## 本次三个坑（累积 AA 完全不生效，三者叠加，各自都是致命的）
-
-* **C# 属性名和 shader 对不上**：C# 设 `_Sample`，但 AddShader 里属性叫 `_SampleRate` → 值永远是默认 `1.0`，权重恒为 `1/2`，每帧 50/50 混合，永不收敛。**shader 属性名必须和 `SetFloat/SetVector` 的字符串逐字一致**。
-* **在屏幕上累积 → 一片灰**：把累积 blit 到屏幕（swapchain 不保留上一帧、Metal 默认不 load），硬件混合读到的历史值是常量，运行平均收敛到常数。见上一节「关键教训」，改成累积到自己持有的 `_accumulate` RT 再显示。
-* **`transform.hasChanged` 不可靠**：挂了移动脚本后，`Controller` 每帧写 `transform.position`（即使加零向量），也会把 `hasChanged` 置 true → 采样计数每帧清零，永远累积不起来。改为**手动比较上一帧的 position/rotation**判断相机是否真的动了。
-
-# 进展：反射与方向光着色
-
-在 `Shade` 里做两件事：往光源发 shadow ray 算硬阴影，反射方向继续弹射（`CSMain` 里循环 8 次，`ray.energy` 逐次乘 specular 衰减，归零就 break）。
-
-```hlsl
-// 反射：交点沿法线偏移一点避免自相交，方向用 reflect，能量乘 specular
-ray.origin = hit.position + hit.normal*0.001f;
-ray.direction = reflect(ray.direction, hit.normal);
-ray.energy *= hit.specular;
-// shadow ray：朝光源发，打中任何东西就是阴影
-Ray shadowRay = CreateRay(hit.position + hit.normal*0.001f, -_LightDir.xyz);
-if(Trace(shadowRay).distance != 1.#INF) return float3(0,0,0);
-// 漫反射：N·L，注意 _LightDir 是照射方向要取反
-return saturate(dot(hit.normal, -_LightDir.xyz)) * _LightDir.w * hit.albedo;
-```
-
-坑：
-
-* **材质要从交点读，别在 Shade 里写死**：一开始 `albedo`/`specular` 写成局部常量，结果所有球一个色。必须用 `hit.albedo`/`hit.specular`（由 `IntersectSphere` 从球体数据带回来）。**写死的默认值会悄悄盖掉传进来的数据，排查时先看是不是没读传入值。**
-* **`_LightDir` 是「照射方向」，算 N·L 和 shadow ray 都要取反**：C# 传的是 `light.transform.forward`（光射出的方向），指向光源要 `-_LightDir.xyz`。
-* **`_LightDir` 每帧在 `SetShaderParameters` 里更新是对的，但灯光转动看不到变化 → 累积糊住**：和相机不动时的道理一样，`Update` 里要额外比较光源 rotation，变了就 `_currentSample=0`，否则新光照被历史帧平均淹没。
-
-# 进展：多球体（ComputeBuffer + 结构体对齐）
-
-需求：C# 控制球体数量，shader 一个循环遍历。普通 uniform 传不了变长数组，用 **ComputeBuffer**。数据流：
-
-```
-C# Sphere[] → ComputeBuffer(count, stride) → SetBuffer → GPU
-                                                  ↓
-shader: StructuredBuffer<Sphere> _Spheres  →  Trace() for 循环
-```
-
-## 最大的坑：C#/shader 的 struct 必须逐字段对齐，stride 要手算
-
-两边各定义一个 `Sphere`，字段顺序、类型必须**完全一致**：
-
-```csharp
-// C#（全是 4 字节 float 字段，Sequential 布局无填充 = 40 字节）
-struct Sphere { public Vector3 position; public float radius; public Vector3 albedo; public Vector3 specular; }
-```
-```hlsl
-// shader
-struct Sphere { float3 position; float radius; float3 albedo; float3 specular; };
-```
-
-* **stride 手算**：3+1+3+3 = 10 floats × 4 = **40 字节**，`new ComputeBuffer(count, sizeof(float)*10)`。写错（比如沿用 `Vector4` 时代的 16）→ 运行时报 stride 不匹配或读出乱数据。
-* **加字段两边必须同步改**，且警惕 HLSL 的 16 字节对齐规则可能插填充——目前这个布局刚好不触发，但不是永远安全。
-* **`struct Sphere` 定义结尾漏分号** → shader 编译失败，所有 kernel 失效（同 [[#进展：相机射线构建]] 那个逗号坑，编译错先查语法）。
-
-## 其它坑
-
-* **重叠剔除别直接丢弃**：最初逻辑是位置重叠就 `continue`，被丢的球不补生成 → 请求 10 个只剩 2 个。改成**每个球重试最多 20 次**找不重叠位置，试满才放弃。
-* **传 shader 的数量要用「实际生成数」`_actualCount`，不是请求数 `sphereCount`**：剔除后实际更少，用 `sphereCount` 会让 `_NumSpheres` 越界读 buffer。
-* **`ComputeBuffer` 必须 `OnDisable` 手动 `Release()`**：非托管资源，不释放 Unity 每次退 Play 报泄漏警告。
-* **误入 `using UnityEditor.*` 会导致打包失败**：IDE 自动补全常引入 `UnityEditor.Experimental.GraphView` 之类，运行时脚本不能引用 UnityEditor 命名空间。
-
-## 动态更新与「静态收敛」的取舍（已回退为静态）
-
-一度加过实时更新（每帧 `SetData` 让球动、Inspector 拖数量实时重建），但发现和渐进式累积**根本冲突**：球每帧变就必须每帧 `_currentSample=0`，等于放弃累积降噪，画面永远是带噪单帧。**动态场景 vs 累积收敛是固有矛盾**（真要动态降噪得上 TAA 时域重投影，另一个话题）。
-
-最终回退为**静态**：球体只在 `OnEnable` 生成一次，改数量/参数后重进 Play 生效。避免了「OnEnable 生成 + Update 重建」两套逻辑打架。
-
-# 后续学习计划
-
-> 随学习进度持续维护，做到哪补到哪。
-
-## 第一阶段完成（URP 下从零到多球体路径追踪）
-
-* [x] Compute Shader 里搭建相机射线（从 `_CameraToWorld` / `_CameraInverseProjection` 生成 ray）
-* [x] 地面平面 + 球体求交，输出法线可视化
-* [x] 天空盒采样（equirectangular 2D 全景图，非 Cubemap）
-* [x] 渐进式抗锯齿（亚像素抖动 + 收敛缓冲加权平均）
-* [x] 反射与多次弹射（`ray.energy` 衰减 + 逐帧收敛降噪）
-* [x] 方向光 + shadow ray 硬阴影
-* [x] 多球体（ComputeBuffer + struct 对齐），随机材质（金属/漫反射）
-
-## 下一阶段
-
-* [ ] 性能：分辨率缩放、线程组尺寸调优
-* [ ] 更丰富的材质（粗糙度、能量守恒的重要性采样）
-* [ ] 评估迁移到 ScriptableRendererFeature 的正统做法
-
-## 配套：相机控制器 Controller.cs
+## 配套：飞行相机 Controller.cs
 
 飞行相机 MVP，用于验证射线/天空盒随视角实时变化：
 
-* 鼠标左键拖拽旋转（yaw + pitch，pitch 限 ±89° 防翻转）
-* WASD 沿 `transform.forward`/`transform.right` 移动，`dir.normalized * (speed * Time.deltaTime)` 保证斜向不加速、帧率无关
-* 注意：它每帧写 `transform.position` 会触发上面第三个坑
+- 鼠标左键拖拽旋转（yaw + pitch，pitch 限 ±89° 防翻转）
+- WASD 沿 `transform.forward` / `transform.right` 移动，`dir.normalized * speed * deltaTime` 保证斜向不加速
+
+> [!warning] Controller 会让 `transform.hasChanged` 永远为 true
+> 它每帧写 `transform.position`（即使加零向量）也会触发 `hasChanged`，导致采样计数每帧清零。见上文"坑 3"的修法。
 
 #Renderer
