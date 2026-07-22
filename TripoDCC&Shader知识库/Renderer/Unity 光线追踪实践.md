@@ -387,6 +387,8 @@ void CSMain (uint3 id : SV_DispatchThreadID)
 - [ ] 性能：分辨率缩放、线程组尺寸调优
 - [ ] 更丰富的材质（粗糙度、能量守恒的重要性采样）
 - [ ] 迁移到 `ScriptableRendererFeature`（URP 正统做法）
+- [ ] https://github.com/SebLague/Ray-Tracing
+- [ ] https://github.com/huailiang/ray_tracing
 
 ---
 
