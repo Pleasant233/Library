@@ -84,7 +84,7 @@ $$\lambda_i = \frac{-C_i}{\sum_k |\nabla_{p_k} C_i|^2 + \varepsilon}, \quad \Del
 ```mermaid
 flowchart TD
     A["1) 施加重力+控制力\n预测 p* = p + Δt·v"] --> B["2) 邻居搜索（基于 p*）\n空间哈希"]
-    B --> C["3) 迭代 2–4 次:\n算所有 λᵢ → 算 Δpᵢ(+s_corr)\n+ 碰撞响应 → p* += Δp"]
+    B --> C["3) 迭代 2–4 次:\n算所有 λᵢ → 算 Δpᵢ(+s_corr)\n再做碰撞响应 → p* += Δp"]
     C --> D["4) v = (p*-p)/Δt"]
     D --> E["5) 涡量约束 + XSPH 粘性\n修正速度"]
     E --> F["6) 提交 p = p*"]
