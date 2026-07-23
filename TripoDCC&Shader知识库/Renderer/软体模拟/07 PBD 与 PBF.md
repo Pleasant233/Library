@@ -34,24 +34,22 @@ flowchart TD
 
 ## 二、约束投影的数学
 
-PBD 的每个约束是一个函数 `C(p) = 0`（满足时为零）。投影就是：沿约束的梯度方向，把位置移动到 `C(p)=0`。
+PBD 的每个约束是一个函数 $C(p) = 0$（满足时为零）。投影就是：沿约束的梯度方向，把位置移动到 $C(p)=0$。
 
 $$\Delta p_i = -\lambda \, w_i \, \nabla_{p_i} C, \quad \lambda = \frac{C(p)}{\sum_k w_k |\nabla_{p_k} C|^2}$$
 
-- `w_i` = 质点的逆质量（inverse mass），质量大的点动得少。
-- `λ` = 拉格朗日乘子，保证约束被满足的同时，各点按质量分配位移。
+- $w_i$ = 质点的逆质量（inverse mass），质量大的点动得少。
+- $\lambda$ = 拉格朗日乘子，保证约束被满足的同时，各点按质量分配位移。
 
 ### 举例：距离约束（弹簧的 PBD 版）
 
-两点距离约束 `C = |p_a - p_b| - d`。投影后：
+两点距离约束 $C = |p_a - p_b| - d$。投影后（$n$ 是两点连线单位向量）：
 
-```
-Δp_a = -w_a/(w_a+w_b) · (|p_a-p_b| - d) · n
-Δp_b = +w_b/(w_a+w_b) · (|p_a-p_b| - d) · n     （n 是两点连线单位向量）
-```
+$$\Delta p_a = -\frac{w_a}{w_a + w_b}\,(|p_a - p_b| - d)\,n$$
+$$\Delta p_b = +\frac{w_b}{w_a + w_b}\,(|p_a - p_b| - d)\,n$$
 
 > [!tip] 本项目的自碰撞就是等质量距离约束
-> [[06 自碰撞与空间哈希]] 里 `SolveSelfCollisionPair` 的 `correction = direction * ((minimumDistance - distance) * 0.5f)`，正是上式在 `w_a = w_b`（等质量，各分一半）时的形式。你早就在用 PBD 的距离约束了。
+> [[06 自碰撞与空间哈希]] 里 `SolveSelfCollisionPair` 的 `correction = direction * ((minimumDistance - distance) * 0.5f)`，正是上式在 $w_a = w_b$（等质量，各分一半）时的形式。你早就在用 PBD 的距离约束了。
 
 ### XPBD：解决刚度和迭代次数耦合
 
@@ -65,19 +63,19 @@ $$\Delta p_i = -\lambda \, w_i \, \nabla_{p_i} C, \quad \lambda = \frac{C(p)}{\s
 
 ### 核心：密度约束
 
-流体不可压缩 = 每个粒子处的密度都等于静止密度 ρ₀。约束写成：
+流体不可压缩 = 每个粒子处的密度都等于静止密度 $\rho_0$。约束写成：
 
 $$C_i = \frac{\rho_i}{\rho_0} - 1, \quad \rho_i = \sum_j m_j W(p_i - p_j, h)$$
 
-- `ρ_i` = 用 SPH 光滑核 `W`（Poly6 核）对邻居加权求和得到的密度。
-- `h` = 光滑半径，`W` 是随距离衰减的核函数。
+- $\rho_i$ = 用 SPH 光滑核 $W$（Poly6 核）对邻居加权求和得到的密度。
+- $h$ = 光滑半径，$W$ 是随距离衰减的核函数。
 
 拉格朗日乘子和位置修正：
 
 $$\lambda_i = \frac{-C_i}{\sum_k |\nabla_{p_k} C_i|^2 + \varepsilon}, \quad \Delta p_i = \frac{1}{\rho_0}\sum_j (\lambda_i + \lambda_j + s_{corr}) \nabla W(p_i - p_j, h)$$
 
-- `ε` = CFM 松弛项，防止邻居太少时分母趋零爆炸。
-- `s_corr` = 人工压力项，防止粒子聚团（clumping），顺便模拟表面张力：`s_corr = -k(W(p_i-p_j,h)/W(Δq,h))ⁿ`，典型 `k≈0.1, n=4`。
+- $\varepsilon$ = CFM 松弛项，防止邻居太少时分母趋零爆炸。
+- $s_{corr}$ = 人工压力项，防止粒子聚团（clumping），顺便模拟表面张力：$s_{corr} = -k\left(\frac{W(p_i-p_j,h)}{W(\Delta q,h)}\right)^n$，典型 $k\approx0.1,\ n=4$。
 
 ### PBF 求解循环
 
@@ -138,8 +136,8 @@ flowchart LR
 
 - 前面所有「Project...」都是 PBD：不算力，直接把位置投影到满足约束。
 - PBD 循环：预测位置 → 迭代投影约束 → 反推速度 → 提交。无条件稳定，适合实时。
-- 约束投影 `Δp = -λ·w·∇C`，自碰撞就是等质量距离约束的特例。
-- PBF = PBD 的流体特化，用密度约束 `C=ρ/ρ₀-1` 表达不可压缩；参考项目走这条路。
+- 约束投影 $\Delta p = -\lambda \cdot w \cdot \nabla C$，自碰撞就是等质量距离约束的特例。
+- PBF = PBD 的流体特化，用密度约束 $C=\rho/\rho_0-1$ 表达不可压缩；参考项目走这条路。
 - 两条路共同内核都是 PBD；换 `C(p)` 就换物理行为，框架不变。
 
 #Renderer #软体模拟
