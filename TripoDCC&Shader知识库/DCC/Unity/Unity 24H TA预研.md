@@ -20,6 +20,15 @@
 * 参考知乎文章，对这套流程有以下拆解
 	* 1.编辑器层面：提供一套自由调节Ramp灯光渐变范围，颜色，强弱等参数的组件or编辑器面板，能够动态调节场景中指定Ramp灯的表现
 	* 2.管线层面：自定义一份lightdata，实现记录光源到物体的距离，采样Ramp图的渐变颜色，实现渐变光照的效果，并与物体法线进行作用。
+* 以下是参考文章所需修改的文件部分，由于其为UE的管线，我们需要还原到Unity6.x的URP管线中。
+
+| 文件路径 | 职责 | 修改内容 |
+|---|---|---|
+| PointLightComponent.h/cpp | 点光源组件，定义灯光属性 | 添加Ramp相关面板属性 |
+| SceneManagement.h | 灯光参数结构体，传递给渲染器 | 修改FLightRenderParameters加参数 |
+| LightComponent.cpp | 灯光组件基类，构建着色器参数 | 传递Ramp纹理资源到着色器 |
+| LightData.ush | Shader端的灯光数据结构 | 修改FDeferredLightData加参数 |
+| DeferredLightingCommon.ush | 延迟光照核心Shader代码 | 插入Ramp采样和假GI计算 |
 * 
 ## 半写实风格质感
 ## 法线描边
