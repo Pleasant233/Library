@@ -14,3 +14,9 @@
 	* 对文件进行预处理后导入，按渲染管线配置贴图，材质
 	* 实例化到世界坐标原点
 * 详细分析见[[Unity Bridge]]
+# 24H 项目（TA / 渲染管线）
+* 本地库地址
+	/Users/shuqiwang/UnityProject/Project24H
+* Unity `6000.3.10f1` + URP `17.3.0`（已 embed），PC Renderer 为 Deferred+
+* 预研与需求拆解见 [[Unity 24H TA预研]]
+* 自定义 Ramp 灯光实施见 [[Ramp Light 知识地图]]

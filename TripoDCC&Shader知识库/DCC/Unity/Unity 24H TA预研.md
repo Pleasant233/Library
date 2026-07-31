@@ -29,7 +29,10 @@
 | LightComponent.cpp | 灯光组件基类，构建着色器参数 | 传递Ramp纹理资源到着色器 |
 | LightData.ush | Shader端的灯光数据结构 | 修改FDeferredLightData加参数 |
 | DeferredLightingCommon.ush | 延迟光照核心Shader代码 | 插入Ramp采样和假GI计算 |
-* 
+### 实施与知识沉淀
+* 已在 `Project24H` 落地美术创作侧（阶段 0 / 1 / 1.1），管线侧阶段 2–6 未开始。
+* 完整学习路径与架构决策记录见 [[Ramp Light 知识地图]]。
+
 ## 半写实风格质感
 ## 法线描边
 ## glitch表现
