@@ -1,7 +1,7 @@
 # Ramp Light 知识地图
 
 > 本系列把「在 Unity 6 URP Deferred+ 里做逐灯自定义 Ramp 光照」拆成一条**从美术需求到管线落地**的学习路径。承接 [[Unity 24H TA预研]] 的灯光表现需求，按 [[学习路径设计方法论]] 的八步法组织。
-> **当前进度：阶段 0、1、1.1 已完成（美术创作侧）。阶段 2–6 未开始（管线侧）。**
+> **当前进度：阶段 0 / 1 / 1.1 / 2 / 2.1 已完成（美术创作侧 + Runtime Bridge）。阶段 3–6 未开始（GPU 与 Shader 侧）。**
 > **从 [[00 为什么要自定义 Ramp 灯光]] 开始。**
 
 ---
@@ -12,9 +12,10 @@
 
 - 本地工程：`/Users/shuqiwang/UnityProject/Project24H`
 - 美术侧代码：`Assets/Features/RampLight/`
+- 管线侧代码：`Packages/com.unity.render-pipelines.universal/Runtime/Customization/RampLight/`
 - Unity 版本：`6000.3.10f1`，URP `17.3.0`（已 embed 到 `Packages/`，便于版本管理和改包）
 - PC Renderer：Deferred+，Native RenderPass 开启
-- 项目内详细计划：`Docs/AI/PLANS.md`；模块说明：`Docs/AI/Modules/URP_RAMP_LIGHT_ART_AUTHORING.md`
+- 项目内详细计划：`Docs/AI/PLANS.md`；模块说明：`Docs/AI/Modules/URP_RAMP_LIGHT_ART_AUTHORING.md`、`URP_RAMP_LIGHT_RUNTIME_BRIDGE.md`
 - 参考实现：[知乎：UE 自定义 Ramp 灯光](https://zhuanlan.zhihu.com/p/1985730965356704809)（UE 管线，需还原到 URP）
 
 ```mermaid
@@ -47,6 +48,7 @@ mindmap
 | 数据 | [[01 附加组件与单一数据源]] | 数据存哪里？为什么删掉了一整层 Atlas 资产 |
 | 转换 | [[02 Gradient 采样与颜色空间]] | Gradient 怎么变像素？HDR 和 Linear 各管什么 |
 | 工具 | [[03 Editor 扩展与实时预览]] | 怎么包成美术能用的界面？编辑器特有的坑 |
+| 桥接 | [[04 Runtime Bridge 与共享 Atlas]] | 数据怎么跨程序集进 URP 包？行号怎么分配才安全 |
 
 > [!tip] 怎么用这个系列
 > - **想理解决策**：只看 00 和 01 的返工部分——**架构判断**是这个阶段最有价值的产出。
@@ -62,7 +64,8 @@ flowchart TD
     S0["阶段 0：基线与回退保护\nFeature-off 截图 + Git 哈希"] --> S1["阶段 1：美术资产与组件\nAtlas 资产 + Profile 索引"]
     S1 --> S11["阶段 1.1：组件内联修正\n删掉 Atlas 层，改为逐灯 Gradient"]
     S11 --> S2["阶段 2：Runtime Bridge\n注册灯 + 自动生成共享 Atlas"]
-    S2 --> S3["阶段 3：平行 GPU Buffer\n与 _AdditionalLightsBuffer 同序"]
+    S2 --> S21["阶段 2.1：Review 修正\n显式 Prepare + Try 语义 + NaN 兜底"]
+    S21 --> S3["阶段 3：平行 GPU Buffer\n与 _AdditionalLightsBuffer 同序"]
     S3 --> S4["阶段 4：HLSL Ramp 调制\n改公共 GetAdditionalLight()"]
     S4 --> S5["阶段 5：Deferred+ 路径一致性"]
     S5 --> S6["阶段 6：性能与收尾"]
@@ -70,9 +73,11 @@ flowchart TD
     style S0 fill:#1e3a5f,color:#fff
     style S1 fill:#1e3a5f,color:#fff
     style S11 fill:#1e3a5f,color:#fff
+    style S2 fill:#1e3a5f,color:#fff
+    style S21 fill:#1e3a5f,color:#fff
 ```
 
-蓝色 = 已完成。**目前场景光照没有任何变化**——美术侧的数据、预览、Gizmo 都通了，但数据还停在 C# 侧，没有上 GPU。
+蓝色 = 已完成。**目前场景光照仍然没有任何变化**——数据已经跨程序集进了 URP 包、共享 Atlas 也建好了，但没有任何管线代码调用 `PrepareAtlasResources()`，GPU 看不到它。第一张画面变化要等阶段 4。
 
 > [!warning] 「工具能用」不等于「效果成立」
 > 这个阶段很容易产生一种错觉：Inspector 里预览条颜色对了、Gizmo 也画出来了，感觉功能好了。**实际渲染结果一像素都没变。**
@@ -111,6 +116,7 @@ light.color *= rampColor.rgb * rampIntensity;                     // 在 BRDF �
 | GPU StructuredBuffer | 阶段 3 的平行 Ramp Buffer（同序索引对齐） |
 | LUT / 一维查表 | Ramp Atlas 的一行就是一条 LUT |
 | 软体模拟的「数据所有权」划分 | 组件 / Bridge / ShaderData 的单向依赖 |
+| 对象池 / GPU buffer 复用 | Bridge 的行号回收栈 + 回收即刷白（[[04 Runtime Bridge 与共享 Atlas]]） |
 
 真正需要新建立的直觉有两个：
 
@@ -119,15 +125,21 @@ light.color *= rampColor.rgb * rampIntensity;                     // 在 BRDF �
 
 ---
 
-## 本阶段最值得记的三条
+## 最值得记的几条
 
-写在最前面，因为它们跨项目通用：
+跨项目通用，按重要性排：
 
-**1. GPU 的数据布局 ≠ 美术的编辑单位。** 阶段 1 把 GPU 侧需要的 Atlas 直接暴露成美术的编辑对象，导致工作流里出现"先创建资产"的仪式步骤和 `profileIndex` 这个脆弱间接层。阶段 1.1 删掉约 580 行，改为逐灯内联 Gradient + 运行时自动汇总 Atlas。详见 [[01 附加组件与单一数据源]]。
+**1. GPU 的数据布局 ≠ 美术的编辑单位。** 阶段 1 把 GPU 侧需要的 Atlas 直接暴露成美术的编辑对象，导致工作流里出现"先创建资产"的仪式步骤和 `profileIndex` 这个脆弱间接层。阶段 1.1 删掉 577 行，改为逐灯内联 Gradient + 运行时自动汇总 Atlas。详见 [[01 附加组件与单一数据源]]。
 
-**2. 默认值必须 Feature-off 等价。** 新挂组件时画面零变化（白 Ramp × 原光色 = 原光色），才能随时用"有组件/无组件"对照排错。
+**2. 默认值必须 Feature-off 等价。** 新挂组件时画面零变化（白 Ramp × 原光色 = 原光色），才能随时用"有组件/无组件"对照排错。同理，Bridge 里**回收的 Atlas 行要刷回白色**。
 
-**3. 用序号当引用是脆弱设计。** `profileIndex = 3` 在列表重排后静默错位，且不会报错。自动分配、**不序列化**的索引才安全。
+**3. 用序号当引用是脆弱设计。** `profileIndex = 3` 在列表重排后静默错位，且不会报错。自动分配、**不序列化**的索引才安全——阶段 2 的行号就是这么做的。
+
+**4. 属性 getter 必须便宜且无副作用。** 阶段 2 的 `AtlasTexture` getter 里藏了整张纹理重建，而阶段 3 会每帧读它。判据：**能不能在调试器里反复求值？** 详见 [[04 Runtime Bridge 与共享 Atlas]]。
+
+**5. 错误处理按「谁能修」分流，不按层次分。** 场景灯数超限 → `Try` + 返回 false + 降级警告；传 null / 数组长度错 → 继续抛。同一个方法里两种策略并存是对的。
+
+**6. 事务性顺序：先预检、再提交、失败回滚。** 别边改状态边检查——中途失败时你记不全已经改了什么。`Peek` 而非 `Pop` 就是这个思路的最小体现。
 
 ---
 
