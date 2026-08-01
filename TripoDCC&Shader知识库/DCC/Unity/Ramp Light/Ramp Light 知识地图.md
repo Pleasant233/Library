@@ -1,7 +1,7 @@
 # Ramp Light 知识地图
 
 > 本系列把「在 Unity 6 URP Deferred+ 里做逐灯自定义 Ramp 光照」拆成一条**从美术需求到管线落地**的学习路径。承接 [[Unity 24H TA预研]] 的灯光表现需求，按 [[学习路径设计方法论]] 的八步法组织。
-> **当前进度：阶段 0 / 1 / 1.1 / 2 / 2.1 已完成（美术创作侧 + Runtime Bridge）。阶段 3–6 未开始（GPU 与 Shader 侧）。**
+> **当前进度：阶段 0 / 1 / 1.1 / 2 / 2.1 / 3 / 3.1 已完成（美术创作侧 + Runtime Bridge + GPU 数据绑定）。阶段 4–6 未开始（HLSL 调制与收尾）。**
 > **从 [[00 为什么要自定义 Ramp 灯光]] 开始。**
 
 ---
@@ -49,6 +49,7 @@ mindmap
 | 转换 | [[02 Gradient 采样与颜色空间]] | Gradient 怎么变像素？HDR 和 Linear 各管什么 |
 | 工具 | [[03 Editor 扩展与实时预览]] | 怎么包成美术能用的界面？编辑器特有的坑 |
 | 桥接 | [[04 Runtime Bridge 与共享 Atlas]] | 数据怎么跨程序集进 URP 包？行号怎么分配才安全 |
+| 上 GPU | [[05 平行 GPU Buffer 与索引对齐]] | 平行 Buffer 怎么和 URP 灯光数组严格同序？错位为什么不报错 |
 
 > [!tip] 怎么用这个系列
 > - **想理解决策**：只看 00 和 01 的返工部分——**架构判断**是这个阶段最有价值的产出。
@@ -65,8 +66,9 @@ flowchart TD
     S1 --> S11["阶段 1.1：组件内联修正\n删掉 Atlas 层，改为逐灯 Gradient"]
     S11 --> S2["阶段 2：Runtime Bridge\n注册灯 + 自动生成共享 Atlas"]
     S2 --> S21["阶段 2.1：Review 修正\n显式 Prepare + Try 语义 + NaN 兜底"]
-    S21 --> S3["阶段 3：平行 GPU Buffer\n与 _AdditionalLightsBuffer 同序"]
-    S3 --> S4["阶段 4：HLSL Ramp 调制\n改公共 GetAdditionalLight()"]
+    S21 --> S3["阶段 3：平行 GPU Buffer\n与 Additional Light 数组同序"]
+    S3 --> S31["阶段 3.1：Review 修正\n删误报断言 + 单一 stride 来源"]
+    S31 --> S4["阶段 4：HLSL Ramp 调制\n改公共 GetAdditionalLight()"]
     S4 --> S5["阶段 5：Deferred+ 路径一致性"]
     S5 --> S6["阶段 6：性能与收尾"]
 
@@ -75,14 +77,25 @@ flowchart TD
     style S11 fill:#1e3a5f,color:#fff
     style S2 fill:#1e3a5f,color:#fff
     style S21 fill:#1e3a5f,color:#fff
+    style S3 fill:#1e3a5f,color:#fff
+    style S31 fill:#1e3a5f,color:#fff
 ```
 
-蓝色 = 已完成。**目前场景光照仍然没有任何变化**——数据已经跨程序集进了 URP 包、共享 Atlas 也建好了，但没有任何管线代码调用 `PrepareAtlasResources()`，GPU 看不到它。第一张画面变化要等阶段 4。
+蓝色 = 已完成。**目前场景光照仍然没有任何变化**——GPU 已经拿到了 Buffer、Atlas、TexelSize、Active 四个全局量，每相机都绑定了，但**没有任何 HLSL 读取它们**。第一张画面变化要等阶段 4。
 
 > [!warning] 「工具能用」不等于「效果成立」
 > 这个阶段很容易产生一种错觉：Inspector 里预览条颜色对了、Gizmo 也画出来了，感觉功能好了。**实际渲染结果一像素都没变。**
 > 项目文档里反复强调这条边界，也明确**不做伪造的 Light Color 预览**（比如临时把灯的颜色改成 Ramp 中段色来"看起来像"）——伪造预览会让后面真正接管线时无法判断哪里出错。
 > 这是「已验证」和「看起来对」的区别，也是 [[学习路径设计方法论]] 原则 4 的验收纪律。
+
+### 阶段 4 待兑现的索引合同
+
+阶段 3 已在 C# 侧写满每个 `lightIter` 槽位，阶段 4 的 HLSL 必须按同一套编号读回来：
+
+- Cluster 路径的 Shader 索引 = `ClusterNext()` 输出 **+ `URP_FP_DIRECTIONAL_LIGHTS_COUNT`**，不是迭代器裸输出。
+- `ClusterDeferred.hlsl` 用两个互补循环覆盖 Local 与 Additional Directional 区段，Ramp 判据要对两者都成立。
+- 按 `atlasRowIndex < 0` 判禁用，不依赖 float 精确相等。
+- 完整推导与源码依据见 [[05 平行 GPU Buffer 与索引对齐]]。
 
 ### 后续三个阶段的关键约束（已在计划里固化）
 
@@ -113,7 +126,8 @@ light.color *= rampColor.rgb * rampIntensity;                     // 在 BRDF �
 | Toon Shading 的 ramp 贴图 | 同一个查表思想，但从**逐材质**变成**逐灯光** |
 | 光追里的累积帧状态管理 | Editor 预览的脏标记 + 节流刷新 |
 | Linear / sRGB 颜色空间 | `GradientUsage(ColorSpace.Linear)` + `RGBAHalf` 的 HDR 数据链 |
-| GPU StructuredBuffer | 阶段 3 的平行 Ramp Buffer（同序索引对齐） |
+| GPU StructuredBuffer | 阶段 3 的平行 Ramp Buffer，已落地（[[05 平行 GPU Buffer 与索引对齐]]） |
+| 软光栅里的顶点属性数组 | 平行数组同 index 索引的对齐责任，跳号即静默错位 |
 | LUT / 一维查表 | Ramp Atlas 的一行就是一条 LUT |
 | 软体模拟的「数据所有权」划分 | 组件 / Bridge / ShaderData 的单向依赖 |
 | 对象池 / GPU buffer 复用 | Bridge 的行号回收栈 + 回收即刷白（[[04 Runtime Bridge 与共享 Atlas]]） |
@@ -140,6 +154,14 @@ light.color *= rampColor.rgb * rampIntensity;                     // 在 BRDF �
 **5. 错误处理按「谁能修」分流，不按层次分。** 场景灯数超限 → `Try` + 返回 false + 降级警告；传 null / 数组长度错 → 继续抛。同一个方法里两种策略并存是对的。
 
 **6. 事务性顺序：先预检、再提交、失败回滚。** 别边改状态边检查——中途失败时你记不全已经改了什么。`Peek` 而非 `Pop` 就是这个思路的最小体现。
+
+**7. 平行数组宁可写占位，绝不跳号。** 同 index 索引的两个数组，长度和空位必须完全一致。跳号导致的错位不报错、不崩溃，只是"颜色怪"，且可能在简单场景下完全正常。详见 [[05 平行 GPU Buffer 与索引对齐]]。
+
+**8. 断言要守不变量，不守"当前恰好成立的巧合"。** 判据：这个等式被谁保证？如果答案是"我观察到目前是这样"，它就不是不变量。Unity 的 `Assertions.Assert` 还受 `UNITY_ASSERTIONS` 控制，错的断言 = 开发期噪音 + 发布期无保护。
+
+**9. 计划里的 API 名 ≠ 运行时真走的路径。** 涉及条件编译或 feature flag 的地方必须查实际取值——URP 的 `useStructuredBuffer` 硬编码 `return false`，照名字实现会挂到永不执行的分支上。
+
+**10. 测试场景要包含"会让错误实现通过"的情况。** 全 Ramp 灯的场景验不出跳号错位，绿色是假的。
 
 ---
 
